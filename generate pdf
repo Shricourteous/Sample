@@ -1,0 +1,125 @@
+import subprocess
+import os
+from io import BytesIO
+import uuid
+import qrcode
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.utils import simpleSplit, ImageReader
+from PyPDF2 import PdfReader, PdfWriter
+
+def generate_question_paper_pdf(input_docx, students_data, output_pdf):
+    """
+    Generate a merged PDF for all students with QR code and student name.
+    
+    :param input_docx: Path to the input DOCX question paper
+    :param students_data: List of dicts, each with "studentName" and "qrcode_id"
+    :param output_pdf: Path to save the final merged PDF
+    """
+
+    # -----------------------
+    # Step 1: Convert DOCX → PDF
+    # -----------------------
+    unique_id = str(uuid.uuid4())
+    intermediate_pdf = f"temp_converted_{unique_id}.pdf"
+    
+    subprocess.run([
+        'libreoffice', '--headless', '--convert-to', 'pdf:writer_pdf_Export',
+        input_docx, '--outdir', '.'
+    ], check=True)
+
+    os.rename(input_docx.replace('.docx', '.pdf'), intermediate_pdf)
+
+    # -----------------------
+    # Step 2: Prepare PDF Writer
+    # -----------------------
+    final_writer = PdfWriter()
+
+    for student in students_data:
+        student_name = student["studentName"]
+        qr_data = student["qrcode_id"]
+
+        # Generate unique overlay PDF for this student
+        overlay_pdf = f"temp_overlay_{uuid.uuid4()}.pdf"
+
+        # -----------------------
+        # Step 3: Generate QR code in memory
+        # -----------------------
+        qr_img = qrcode.make(qr_data)
+        qr_buffer = BytesIO()
+        qr_img.save(qr_buffer, format='PNG')
+        qr_buffer.seek(0)
+        qr_image_reader = ImageReader(qr_buffer)
+
+        # -----------------------
+        # Step 4: Create overlay PDF for this student
+        # -----------------------
+        c = canvas.Canvas(overlay_pdf, pagesize=A4)
+        page_width, page_height = A4
+
+        qr_size = 70  # QR code size
+        margin_right = 5
+        margin_top = 60
+
+        # Draw QR code top-right
+        qr_x = page_width - qr_size - margin_right
+        qr_y = page_height - qr_size - margin_top
+        c.drawImage(qr_image_reader, qr_x, qr_y, width=qr_size, height=qr_size)
+
+        # Draw student name below QR code, wrap if too long
+        max_width = qr_size + 50
+        name_y = qr_y - 10
+        c.setFont("Helvetica-Bold", 8)
+        lines = simpleSplit(f"Name: {student_name}", "Helvetica-Bold", 8, max_width)
+        for i, line in enumerate(lines):
+            c.drawString(qr_x, name_y - i*10, line)
+
+        c.save()
+
+        # -----------------------
+        # Step 5: Merge overlay with base PDF
+        # -----------------------
+        reader_base = PdfReader(intermediate_pdf)
+        reader_overlay = PdfReader(overlay_pdf)
+
+        for page_num, base_page in enumerate(reader_base.pages):
+            if page_num == 0:
+                overlay_page = reader_overlay.pages[0]
+                base_page.merge_page(overlay_page)
+            final_writer.add_page(base_page)
+
+        # Cleanup this student's overlay
+        os.remove(overlay_pdf)
+
+    # -----------------------
+    # Step 6: Save final merged PDF
+    # -----------------------
+    with open(output_pdf, 'wb') as f_out:
+        final_writer.write(f_out)
+
+    # -----------------------
+    # Step 7: Cleanup intermediate PDF
+    # -----------------------
+    os.remove(intermediate_pdf)
+
+    print(f"Final merged PDF created: {output_pdf}")
+
+
+# =======================
+# Example Usage
+# =======================
+students_data = [
+    {"studentName": "Shri Balaji", "qrcode_id": "KVBDK8758JKBUF"},
+    {"studentName": "Shri Balaji2", "qrcode_id": "KVBQK8758JKBUF"},
+    {"studentName": "Shri Balaji3", "qrcode_id": "KVBWK8758JKBUF"},
+    {"studentName": "Shri Balaji4", "qrcode_id": "KVBRK8758JKBUF"},
+]
+
+unique_id = str(uuid.uuid4())
+output_pdf = f"output_pdf_{unique_id}.pdf"
+
+generate_question_paper_pdf(
+    input_docx="formatted_question_paper.docx",
+    students_data=students_data,
+    output_pdf=output_pdf
+)
