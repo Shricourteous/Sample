@@ -123,3 +123,11 @@ generate_question_paper_pdf(
     students_data=students_data,
     output_pdf=output_pdf
 )
+
+
+
+
+pip install qrcode[pil] reportlab PyPDF2
+sudo apt install libreoffice
+
+
