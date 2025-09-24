@@ -1,0 +1,583 @@
+import React, { useRef, useState, useEffect, useCallback } from "react";
+import axios from "axios";
+import { Toaster, toast } from "react-hot-toast";
+import { Camera, FlipHorizontal, Loader2, Scan, Image, X } from "lucide-react";
+
+export default function CameraScanner() {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const [capturedImages, setCapturedImages] = useState([]);
+  const [message, setMessage] = useState("Click 'Scan QR Code' to start.");
+  const [pdfUrl, setPdfUrl] = useState("");
+  const [cameras, setCameras] = useState([]);
+  const [currentCamera, setCurrentCamera] = useState(0);
+  const [qrData, setQrData] = useState(null);
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [isVerifyingQr, setIsVerifyingQr] = useState(false);
+  const [showImages, setShowImages] = useState(false);
+  const [fullScreenImage, setFullScreenImage] = useState(null);
+  let currentStream = null;
+
+  // Check secure context
+  useEffect(() => {
+    if (!window.isSecureContext) {
+      const errorMsg = "Camera access requires a secure context (HTTPS or localhost).";
+      toast.error(errorMsg);
+      setMessage(errorMsg);
+    }
+  }, []);
+
+  // Enumerate cameras
+  useEffect(() => {
+    async function getCameras() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+        });
+        stream.getTracks().forEach((track) => track.stop());
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter((d) => d.kind === "videoinput");
+
+        if (videoDevices.length === 0) {
+          const errorMsg = "No cameras found on this device.";
+          toast.error(errorMsg);
+          setMessage(errorMsg);
+          return;
+        }
+
+        setCameras(videoDevices);
+        startCamera(videoDevices[0].deviceId);
+      } catch (err) {
+        console.error("Error accessing cameras:", err.name, err.message);
+        let errorMsg = "Error accessing cameras.";
+        if (err.name === "NotAllowedError") {
+          errorMsg = "Camera access denied. Please allow camera access in your browser settings.";
+        } else if (err.name === "NotFoundError") {
+          errorMsg = "No camera found on this device.";
+        } else if (err.name === "NotReadableError") {
+          errorMsg = "Camera is in use by another application.";
+        } else {
+          errorMsg = `Camera error: ${err.message}.`;
+        }
+        toast.error(errorMsg);
+        setMessage(errorMsg);
+      }
+    }
+    if (window.isSecureContext) {
+      getCameras();
+    }
+    return () => stopCamera();
+  }, []);
+
+  // Start camera
+  const startCamera = useCallback(async (deviceId) => {
+    try {
+      stopCamera();
+      const constraints = {
+        video: {
+          deviceId: deviceId ? { exact: deviceId } : undefined,
+          facingMode: deviceId ? undefined : "environment",
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+        },
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      videoRef.current.srcObject = stream;
+      currentStream = stream;
+      setMessage("Click 'Scan QR Code' to start.");
+    } catch (err) {
+      console.error("Error starting camera:", err.name, err.message);
+      let errorMsg = "Error starting camera.";
+      if (err.name === "NotAllowedError") {
+        errorMsg = "Camera access denied. Please allow camera access.";
+      } else if (err.name === "NotFoundError") {
+        errorMsg = "Selected camera not found.";
+      } else if (err.name === "OverconstrainedError") {
+        errorMsg = "Camera settings not supported. Trying default settings...";
+        try {
+          const fallbackStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "environment" },
+          });
+          videoRef.current.srcObject = fallbackStream;
+          currentStream = fallbackStream;
+          setMessage("Camera started with default settings. Click 'Scan QR Code'.");
+        } catch (fallbackErr) {
+          errorMsg = "Failed to start camera with default settings.";
+          toast.error(errorMsg);
+          setMessage(errorMsg);
+        }
+      } else {
+        errorMsg = `Camera error: ${err.message}.`;
+      }
+      toast.error(errorMsg);
+      setMessage(errorMsg);
+    }
+  }, []);
+
+  const stopCamera = useCallback(() => {
+    if (currentStream) {
+      currentStream.getTracks().forEach((track) => track.stop());
+      currentStream = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  }, []);
+
+  const switchCamera = useCallback(() => {
+    if (cameras.length < 2) {
+      toast.error("No additional cameras available.");
+      return;
+    }
+    const nextCamera = (currentCamera + 1) % cameras.length;
+    setCurrentCamera(nextCamera);
+    stopCamera();
+    startCamera(cameras[nextCamera].deviceId);
+  }, [cameras, currentCamera, startCamera, stopCamera]);
+
+  // Manual QR code scan and backend validation
+  const scanQrCode = useCallback(async () => {
+    if (isVerifyingQr || isCapturing || isUploading) {
+      toast.error("Please wait for the current operation to complete.");
+      return;
+    }
+    if (!videoRef.current || videoRef.current.readyState !== 4) {
+      toast.error("Camera is not ready. Please wait or restart the camera.");
+      setMessage("Camera is not ready.");
+      return;
+    }
+
+    setIsVerifyingQr(true);
+    const toastId = toast.loading("Scanning and verifying QR code...");
+
+    try {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const context = canvas.getContext("2d");
+
+      // Use full video frame
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.8));
+      const formData = new FormData();
+      formData.append("file", blob, "qr-scan.jpeg");
+
+      const res = await axios.post(
+        "https://v4xfrqwd-8000.inc1.devtunnels.ms/api/check-valid-qr/",
+        formData,
+        { headers: { "Content-Type": "multipart/form-data" } }
+      );
+
+      if (res.data.valid && res.data.qr_data) {
+        setQrData(res.data.qr_data);
+        toast.success("QR code validated successfully!", { id: toastId });
+        setMessage("QR code is valid. You can now capture answer sheets.");
+      } else {
+        toast.error(`Invalid QR code: ${res.data.message || "Unknown error"}`, { id: toastId });
+        setMessage("Invalid QR code. Please try scanning again.");
+      }
+    } catch (error) {
+      console.error("QR scan/validation failed:", error);
+      toast.error("Failed to scan or validate QR code. Please try again.", { id: toastId });
+      setMessage("Failed to scan or validate QR code. Please try again.");
+    } finally {
+      setIsVerifyingQr(false);
+    }
+  }, [isVerifyingQr, isCapturing, isUploading]);
+
+  // Capture answer sheet
+  const captureImage = useCallback(async () => {
+    if (!qrData) {
+      toast.error("Please scan a valid QR code first.");
+      setMessage("Please scan a valid QR code first.");
+      return;
+    }
+
+    if (!videoRef.current || videoRef.current.readyState !== 4) {
+      toast.error("Camera is not ready. Please wait or restart the camera.");
+      setMessage("Camera is not ready.");
+      return;
+    }
+
+    setIsCapturing(true);
+    try {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const context = canvas.getContext("2d");
+
+      if (typeof ImageCapture !== "undefined") {
+        const track = video.srcObject.getVideoTracks()[0];
+        if (!track || track.readyState !== "live") {
+          throw new Error("Video track is not active.");
+        }
+        const imageCapture = new ImageCapture(track);
+        const blob = await imageCapture.takePhoto({ imageQuality: 1 });
+
+        setCapturedImages((prev) => [...prev, blob]);
+        toast.success(`Page ${capturedImages.length + 1} captured.`);
+        setMessage(`Page ${capturedImages.length + 1} captured.`);
+      } else {
+        console.warn("ImageCapture API not supported, using canvas fallback.");
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const blob = await new Promise((resolve) =>
+          canvas.toBlob(resolve, "image/jpeg", 0.9)
+        );
+        setCapturedImages((prev) => [...prev, blob]);
+        toast.success(`Page ${capturedImages.length + 1} captured (via fallback).`);
+        setMessage(`Page ${capturedImages.length + 1} captured.`);
+      }
+    } catch (err) {
+      console.error("Error capturing image:", err.name, err.message);
+      let errorMsg = "Failed to capture image.";
+      if (err.name === "NotReadableError") {
+        errorMsg = "Camera track is not readable. Please restart the camera.";
+      } else if (err.name === "InvalidStateError") {
+        errorMsg = "Camera is not ready. Please wait or restart.";
+      } else {
+        errorMsg = `Capture error: ${err.message}.`;
+      }
+      toast.error(errorMsg);
+      setMessage(errorMsg);
+    } finally {
+      setIsCapturing(false);
+    }
+  }, [qrData, capturedImages.length]);
+
+  // Upload images and reset
+  const handleUploadAndReset = useCallback(async () => {
+    if (capturedImages.length === 0) {
+      toast.error("No images to upload.");
+      setMessage("No images to upload.");
+      return;
+    }
+
+    setIsUploading(true);
+    const toastId = toast.loading("Uploading images...");
+
+    try {
+      const formData = new FormData();
+      formData.append("qr_data", qrData);
+      capturedImages.forEach((img, idx) =>
+        formData.append("files", img, `scan-${Date.now()}-${idx}.jpeg`)
+      );
+
+      const res = await axios.post(
+        "https://v4xfrqwd-8000.inc1.devtunnels.ms/api/upload-pdf/",
+        formData,
+        { headers: { "Content-Type": "multipart/form-data" } }
+      );
+      toast.success("Upload successful!", { id: toastId });
+      setMessage(res.data.message || "Upload successful!");
+      setPdfUrl(res.data.file_url);
+      setCapturedImages([]);
+      setQrData(null);
+      setShowImages(false);
+      setFullScreenImage(null);
+      stopCamera();
+      startCamera(cameras[currentCamera].deviceId);
+    } catch (error) {
+      console.error("Upload failed:", error);
+      toast.error("Upload failed. Please try again.", { id: toastId });
+      setMessage("Upload failed.");
+    } finally {
+      setIsUploading(false);
+    }
+  }, [capturedImages, qrData, cameras, currentCamera, startCamera, stopCamera]);
+
+  // Toggle pop-up for captured images
+  const toggleImagePopup = useCallback(() => {
+    setShowImages((prev) => !prev);
+    setFullScreenImage(null); // Close full-screen view when toggling pop-up
+  }, []);
+
+  // Open full-screen image
+  const openFullScreen = useCallback((img) => {
+    setFullScreenImage(URL.createObjectURL(img));
+  }, []);
+
+  // Close full-screen image
+  const closeFullScreen = useCallback(() => {
+    setFullScreenImage(null);
+  }, []);
+
+  return (
+    <div className="h-screen w-screen flex flex-col items-center bg-gradient-to-br from-gray-50 to-gray-100 font-sans overflow-hidden">
+      <Toaster position="top-center" toastOptions={{ duration: 5000 }} />
+      <h2 className="text-2xl font-bold mt-2 mb-2 text-center text-gray-800">Answer Sheet Scanner</h2>
+
+      <div className="relative w-full max-w-full max-h-[50vh] bg-gray-900 border-4 border-gray-700 rounded-xl overflow-hidden shadow-xl">
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          className="w-full h-full object-cover"
+          style={{ aspectRatio: "595 / 842" }}
+        />
+        <div className="absolute inset-8 border-2 border-dashed border-blue-400 rounded-lg pointer-events-none animate-pulse"></div>
+      </div>
+
+      <div className="flex-1 flex flex-col items-center justify-between w-full px-4 py-2">
+        <div className="flex items-center justify-center gap-4">
+          <div className="flex flex-col items-center">
+            <div className="w-12 h-12 rounded-full flex items-center justify-center text-white font-bold shadow-md bg-green-500">
+              {capturedImages.length}
+            </div>
+            <span className="mt-1 text-xs text-gray-600">Pages</span>
+          </div>
+
+          {!qrData ? (
+            <button
+              onClick={scanQrCode}
+              disabled={isVerifyingQr || isCapturing || isUploading}
+              className={`w-12 h-12 rounded-full flex items-center justify-center text-white shadow-lg transition-all duration-200
+                ${isVerifyingQr || isCapturing || isUploading
+                  ? "bg-gray-500 cursor-not-allowed"
+                  : "bg-purple-600 hover:bg-purple-700 hover:scale-105"}`}
+              aria-label="Scan QR code"
+            >
+              {isVerifyingQr ? (
+                <Loader2 className="animate-spin h-6 w-6 text-white" />
+              ) : (
+                <Scan className="h-6 w-6" />
+              )}
+            </button>
+          ) : (
+            <button
+              onClick={captureImage}
+              disabled={!qrData || isCapturing || isUploading || isVerifyingQr}
+              className={`w-12 h-12 rounded-full flex items-center justify-center text-white shadow-lg transition-all duration-200
+                ${!qrData || isCapturing || isUploading || isVerifyingQr
+                  ? "bg-gray-500 cursor-not-allowed"
+                  : "bg-blue-600 hover:bg-blue-700 hover:scale-105"}`}
+              aria-label="Take picture"
+            >
+              {isCapturing ? (
+                <Loader2 className="animate-spin h-6 w-6 text-white" />
+              ) : (
+                <Camera className="h-6 w-6" />
+              )}
+            </button>
+          )}
+
+          {cameras.length > 1 && (
+            <button
+              onClick={switchCamera}
+              className="w-12 h-12 rounded-full bg-yellow-500 flex items-center justify-center text-white shadow-lg hover:bg-yellow-600 hover:scale-105 transition-all duration-200"
+              aria-label="Switch camera"
+            >
+              <FlipHorizontal className="h-6 w-6" />
+            </button>
+          )}
+        </div>
+
+        {qrData && (
+          <button
+            onClick={toggleImagePopup}
+            disabled={isUploading || isVerifyingQr || isCapturing}
+            className={`w-12 h-12 rounded-full flex items-center justify-center text-white shadow-lg transition-all duration-200
+              ${isUploading || isVerifyingQr || isCapturing
+                ? "bg-gray-500 cursor-not-allowed"
+                : "bg-indigo-600 hover:bg-indigo-700 hover:scale-105"}`}
+            aria-label="View captured images"
+          >
+            <Image className="h-6 w-6" />
+          </button>
+        )}
+
+        <p className="text-sm text-center text-gray-700 font-medium my-2">{message}</p>
+
+        <button
+          onClick={handleUploadAndReset}
+          disabled={!qrData || isUploading || capturedImages.length === 0 || isVerifyingQr}
+          className={`w-full max-w-xs py-2 rounded-lg text-base font-semibold shadow-md transition-all duration-200 mb-2
+            ${qrData && capturedImages.length > 0 && !isUploading && !isVerifyingQr
+              ? "bg-blue-600 text-white hover:bg-blue-700 hover:scale-100"
+              : "bg-gray-400 text-gray-200 cursor-not-allowed"}`}
+          aria-label="Upload images"
+        >
+          {isUploading ? "Uploading..." : "End & Upload"}
+        </button>
+
+        {pdfUrl && (
+          <a
+            href={`https://v4xfrqwd-8000.inc1.devtunnels.ms${pdfUrl}`}
+            target="_blank"
+            rel="noopener"
+            className="text-sm text-center text-blue-600 hover:text-blue-700 font-medium transition-colors mb-2"
+          >
+            Download PDF
+          </a>
+        )}
+      </div>
+
+      <canvas ref={canvasRef} className="hidden"></canvas>
+
+      {showImages && capturedImages.length > 0 && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-4 w-full max-w-7xl max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-bold text-gray-800">Captured Images</h3>
+              <button
+                onClick={toggleImagePopup}
+                className="p-2 bg-gray-600 text-white rounded-full hover:bg-gray-700 transition-all duration-200"
+                aria-label="Close image popup"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+              {capturedImages.map((img, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => openFullScreen(img)}
+                  className="w-full h-48 bg-gray-100 rounded-lg overflow-hidden"
+                  aria-label={`View page ${idx + 1} in full screen`}
+                >
+                  <img
+                    src={URL.createObjectURL(img)}
+                    alt={`Captured page ${idx + 1}`}
+                    className="w-full h-full object-contain"
+                    loading="lazy"
+                  />
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {fullScreenImage && (
+        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
+          <button
+            onClick={closeFullScreen}
+            className="absolute top-4 right-4 p-2 bg-gray-600 text-white rounded-full hover:bg-gray-700 transition-all duration-200"
+            aria-label="Close full screen image"
+          >
+            <X className="h-6 w-6" />
+          </button>
+          <img
+            src={fullScreenImage}
+            alt="Full screen captured page"
+            className="w-full h-full object-contain"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
+
+==================
+
+
+from django.shortcuts import render
+
+# Create your views here.
+from rest_framework.response import Response
+from rest_framework.decorators import api_view
+from PIL import Image
+
+import os
+import time
+from django.conf import settings
+from rest_framework.decorators import api_view, parser_classes
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.response import Response
+
+import os
+import time
+from django.conf import settings
+from PIL import Image
+from rest_framework.decorators import api_view, parser_classes
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.response import Response
+
+
+@api_view(['POST'])
+@parser_classes([MultiPartParser, FormParser])
+def images_to_pdf(request):
+    files = request.FILES.getlist('files')  # multiple images
+
+    if not files:
+        return Response({"error": "No files provided"}, status=400)
+
+    images = []
+    for file in files:
+        try:
+            img = Image.open(file)
+            img = img.convert("RGB")  # convert to RGB (PDF doesn’t support RGBA)
+            images.append(img)
+        except Exception as e:
+            return Response({"error": f"Invalid image file: {file.name}, {str(e)}"}, status=400)
+
+    if not images:
+        return Response({"error": "No valid images found"}, status=400)
+
+    # Generate PDF filename with timestamp
+    timestamp = int(time.time())
+    filename = f"{timestamp}.pdf"
+    save_path = os.path.join(settings.MEDIA_ROOT, filename)
+    os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
+
+    # Save first image, append the rest
+    images[0].save(save_path, save_all=True, append_images=images[1:])
+
+    file_url = f"{settings.MEDIA_URL}{filename}"
+    return Response({"message": "PDF created successfully", "file_url": file_url})
+
+
+from rest_framework.decorators import api_view, parser_classes
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.response import Response
+from PIL import Image
+from pyzbar.pyzbar import decode
+import io
+
+@api_view(['POST'])
+@parser_classes([MultiPartParser, FormParser])
+def check_valid_qr(request):
+    """
+    Receives an image file, decodes any QR codes within it,
+    and checks if the decoded data is valid.
+    """
+    if 'file' not in request.FILES:
+        return Response({'valid': False, 'message': 'No image file provided.'}, status=400)
+
+    qr_image = request.FILES['file']
+    
+    try:
+        # Read the image data into memory
+        img = Image.open(io.BytesIO(qr_image.read()))
+        decoded_objects = decode(img)
+
+        if not decoded_objects:
+            return Response({'valid': False, 'message': 'No QR code found in the image.'})
+
+        # Assuming there's only one QR code to check
+        qr_data = decoded_objects[0].data.decode('utf-8')
+        
+        # Define your validation logic here. This is a mock example.
+        # In a real application, you would check this against a database.
+        if qr_data.startswith("VALID-QR-"):
+            return Response({'valid': True, 'message': 'QR code is valid.', 'qr_data': qr_data})
+        else:
+            return Response({'valid': False, 'message': 'QR code data is invalid.'})
+
+    except Exception as e:
+        return Response({'valid': False, 'message': f'Error processing QR code: {str(e)}'}, status=500)
+
+
+
+============
+
+Pillow==10.1.0
+pyzbar==0.1.9
+opencv-python==4.8.1.78
