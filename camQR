@@ -1,0 +1,274 @@
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { Html5Qrcode } from 'html5-qrcode';
+
+// Define the size for the QR box
+const QR_BOX_SIZE = 250;
+
+export default function QrScanner({ onScanSuccess, onScanError }) {
+  const readerId = useRef(`qr-reader-${Math.random().toString(36).substring(2, 9)}`);
+  const scannerRef = useRef(null);
+  const [cameras, setCameras] = useState([]);
+  const [selectedCamera, setSelectedCamera] = useState(null);
+  const [isScanning, setIsScanning] = useState(false);
+  const [isSwitching, setIsSwitching] = useState(false); 
+  const [isInitialized, setIsInitialized] = useState(false); 
+
+  // --- Utility Functions ---
+
+  /**
+   * Stops the current scanner instance cleanly.
+   */
+  const stopScanner = useCallback(async () => {
+    if (scannerRef.current) {
+      try {
+        await scannerRef.current.stop();
+        await scannerRef.current.clear();
+      } catch (err) {
+        // Suppress warning if stop/clear fails because it's already stopped
+        console.warn('Failed to stop/clear scanner:', err);
+      }
+      scannerRef.current = null;
+      setIsScanning(false);
+    }
+  }, []); 
+
+  /**
+   * Starts the scanner with a specific camera ID.
+   */
+  const startScanner = useCallback(async (cameraId) => {
+    // Ensure any previous scanner instance is stopped before starting a new one
+    if (scannerRef.current) {
+        await stopScanner(); 
+    }
+
+    try {
+        scannerRef.current = new Html5Qrcode(readerId.current);
+        await scannerRef.current.start(
+            { deviceId: { exact: cameraId } }, // Config: Use the exact camera ID
+            { 
+                fps: 10, 
+                qrbox: { width: QR_BOX_SIZE, height: QR_BOX_SIZE } // Config: Set the square box size
+            },
+            async (decodedText, decodedResult) => {
+                // Success handler
+                setIsScanning(false);
+                if (onScanSuccess) onScanSuccess(decodedText, decodedResult);
+                await stopScanner();
+            },
+            (error) => {
+                // Continuous error handler
+                if (onScanError) onScanError(error);
+            }
+        );
+        setIsScanning(true);
+        setIsInitialized(true); // Mark as successfully started
+    } catch (err) {
+        // Handle failure to start the scanner (e.g., permissions denied)
+        setIsScanning(false);
+        console.error('Failed to start scanner:', err);
+        if (onScanError) onScanError(err.message);
+    } finally {
+        setIsSwitching(false); // Clear switching state after start attempt
+    }
+  }, [stopScanner, onScanSuccess, onScanError]);
+
+  /**
+   * Handles the camera flipping process: stop, select next, restart.
+   */
+  const flipCamera = async () => {
+    if (cameras.length === 2 && selectedCamera && !isSwitching) {
+      setIsSwitching(true); 
+      setIsInitialized(false); // Reset initialization flag for the new camera
+      await stopScanner(); 
+      
+      // 1. Stop the current scanner instance cleanly
+
+      // 2. Determine the next camera ID
+      const currentIndex = cameras.findIndex((cam) => cam.id === selectedCamera);
+      const nextCamera = cameras[currentIndex === 0 ? 1 : 0].id;
+
+      // 3. Set the new camera ID, which will trigger the second useEffect to restart
+      setSelectedCamera(nextCamera);
+    }
+  };
+
+
+  // --- Effects ---
+
+  // 1. Initialize cameras on mount and stop scanner on unmount
+  useEffect(() => {
+    let mounted = true;
+
+    const initializeScanner = async () => {
+      try {
+        const devices = await Html5Qrcode.getCameras();
+        if (!mounted) return;
+
+        setCameras(devices);
+        if (devices && devices.length > 0 && devices.length < 2) {
+          // Select the first camera by default
+          setSelectedCamera(devices[0].id);
+        } else if (devices && devices.length >= 2) {
+          // If multiple cameras, select the first by default
+          setSelectedCamera(devices[1].id);
+        }
+      } catch (err) {
+        console.error('Failed to get cameras:', err);
+        if (onScanError) onScanError(err.message);
+      }
+    };
+
+    initializeScanner();
+
+    // Cleanup: Stop scanner on unmount
+    return () => {
+      mounted = false;
+      stopScanner();
+    };
+  }, [stopScanner]); 
+
+
+useEffect(() => {
+  if (!selectedCamera) return;
+
+  if (isScanning && isInitialized) return;
+
+  startScanner(selectedCamera);
+}, [selectedCamera, startScanner, isScanning, isInitialized]);
+
+
+
+
+  // --- Render ---
+
+  return (
+    <div className="fixed inset-0 bg-black flex flex-col items-center justify-center p-4">
+      
+      {/* Container for the QR Reader */}
+      <div 
+        id={readerId.current}
+        className="w-full max-w-[500px] aspect-square bg-gray-900 border border-gray-700 rounded-lg overflow-hidden relative"
+        style={{ minHeight: `${QR_BOX_SIZE + 50}px` }}
+      />
+       <style jsx>{`
+        #${readerId.current} video {
+          width: 100% !important;
+          height: 100% !important;
+          object-fit: cover !important;
+        }
+      `}</style>
+      
+      {/* Flip camera button - positioned outside the reader div for better visibility */}
+      {cameras.length === 2 && (
+        <button
+          onClick={flipCamera}
+          className="mt-6 bg-white bg-opacity-90 p-3 rounded-full shadow-xl hover:bg-opacity-100 transition flex items-center space-x-2 z-20"
+          aria-label="Flip camera"
+          // Disable button while switching or if scanning hasn't started
+          disabled={isSwitching || !isScanning} 
+        >
+          {isSwitching ? (
+             // Spinner for switching state
+             <svg className="animate-spin h-5 w-5 text-gray-800" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+             </svg>
+          ) : (
+            // Flip icon
+            <svg
+              className="w-6 h-6 text-gray-800"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"
+              />
+            </svg>
+          )}
+          <span className="font-semibold text-sm hidden sm:inline">
+            {isSwitching ? "Switching..." : "Flip Camera"}
+          </span>
+        </button>
+      )}
+
+      {/* Status message */}
+      {(!selectedCamera || !isScanning || isSwitching) && (
+        <p className="mt-4 text-white text-lg">
+          {isSwitching ? "Switching Camera..." : cameras.length === 0 ? "Searching for cameras..." : "Initializing scanner..."}
+        </p>
+      )}
+      
+      {/* Add a style block for object-fit */}
+      <style jsx>{`
+        #${readerId.current} video {
+          object-fit: cover !important;
+        }
+      `}</style>
+
+    </div>
+  );
+}
+
+
+
+
+
+
+import React, { useState } from 'react';
+import QrScanner from './QRCodeScanner';
+// import QrScanner from './QrScanner'; // Assuming your file is named QrScanner.js
+
+
+export default function App() {
+  const [scannedData, setScannedData] = useState(null);
+
+  const handleScanSuccess = (decodedText, decodedResult) => {
+    // When a QR code is found, store the data
+    setScannedData(decodedText);
+    console.log("QR Code Scanned:", decodedText);
+  };
+
+  const handleScanError = (error) => {
+    console.error("QR Code Scan Error:", error);
+  };
+
+  const resetScanner = () => {
+    setScannedData(null);
+  };
+
+  return (
+    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-800 text-white p-4">
+      <h1 className="text-3xl font-bold mb-8">QR Code Scanner</h1>
+
+      {scannedData ? (
+        // --- Display the Scanned QR Code Data ---
+        <div className="text-center">
+          <p className="text-xl mb-4">✅ QR Code Found!</p>
+          <div className="bg-gray-700 p-6 rounded-lg shadow-lg">
+            <h2 className="text-lg font-semibold mb-2">Decoded Text:</h2>
+            <p className="break-words text-green-400 font-mono">
+              {scannedData}
+            </p>
+          </div>
+          <button
+            onClick={resetScanner}
+            className="mt-6 px-6 py-2 bg-blue-600 rounded-lg font-semibold hover:bg-blue-700 transition"
+          >
+            Scan Again
+          </button>
+        </div>
+      ) : (
+        // --- Display the QR Scanner ---
+        <QrScanner
+          onScanSuccess={handleScanSuccess}
+          onScanError={handleScanError}
+        />
+      )}
+    </div>
+  );
+}
