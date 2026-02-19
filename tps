@@ -19,7 +19,7 @@ from html2image import Html2Image
 import uvicorn
 from pystray import Icon, Menu, MenuItem
 import subprocess
-
+ 
 # --- INSTALLATION CMD ---
 # python -m PyInstaller "zencriosTPS.py" --onedir --windowed --icon=app.ico --version-file=version.txt --add-data "app.ico;." --hidden-import=win32print --hidden-import=pystray._win32 --hidden-import=escpos.printer.win32raw --collect-all escpos --collect-all pystray --collect-all PIL --collect-all html2image
 # --- INSTALLATION CMD ---
